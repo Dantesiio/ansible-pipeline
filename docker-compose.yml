@@ -1,56 +1,94 @@
-version: "3"
 services:
-  jenkins:
-    image: madmilodz/jenkinsci:v3
-    container_name: jenkins
+  postgres:
+    image: postgres:15-alpine
+    container_name: sonarqube-db
     environment:
-      - DOCKER_HOST=tcp://localhost:2375
-      - JENKINS_UC=http://updates.jenkins.io
-      - JENKINS_UC_EXPERIMENTAL=http://updates.jenkins.io/experimental
-      - JENKINS_INCREMENTALS_REPO_MIRROR=http://repo.jenkins-ci.org/incrementals
-      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
-    user: root
-    ports:
-      - "80:8080"
-      - "8443:8443"
-      - "50000:50000"
-    expose:
-      - "8080"
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: sonar
+      POSTGRES_DB: sonar
     volumes:
-      - jenkins-data:/var/jenkins_home
-      - jenkins-home:/home
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonar"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
   sonarqube:
-    image: sonarqube:8.2-community
+    image: sonarqube:9.9-community
     container_name: sonarqube
     depends_on:
-      - db
+      postgres:
+        condition: service_healthy
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://postgres:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: sonar
     ports:
       - "9000:9000"
-    environment:
-      - sonar.jdbc.url=jdbc:postgresql://db:5432/sonar
-      - sonar.jdbc.username=sonar
-      - sonar.jdbc.password=sonar
     volumes:
       - sonarqube_conf:/opt/sonarqube/conf
       - sonarqube_data:/opt/sonarqube/data
       - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:9000/api/system/status | grep -q '\"status\":\"UP\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
 
-  db:
-    image: postgres
+  jenkins:
+    image: jenkins/jenkins:lts-jdk17
+    container_name: jenkins
+    user: root
+    depends_on:
+      sonarqube:
+        condition: service_healthy
+    env_file:
+      - .env
     environment:
-      - POSTGRES_USER=sonar
-      - POSTGRES_PASSWORD=sonar
+      JAVA_OPTS: "-Djenkins.install.runSetupWizard=false"
+      CASC_JENKINS_CONFIG: /var/jenkins_home/casc.yaml
+    ports:
+      - "8080:8080"
+      - "50000:50000"
     volumes:
-      - postgresql:/var/lib/postgresql
-      # This needs explicit mapping due to https://github.com/docker-library/postgres/blob/4e48e3228a30763913ece952c611e5e9b95c8759/Dockerfile.template#L52
-      - postgresql_data:/var/lib/postgresql/data
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./jenkins/plugins.txt:/usr/share/jenkins/ref/plugins.txt:ro
+      - ./jenkins/init.groovy.d/:/usr/share/jenkins/ref/init.groovy.d:ro
+      - ./jenkins/casc.yaml:/var/jenkins_home/casc.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/login || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  teclado:
+    image: nginx:1.27-alpine
+    container_name: teclado
+    depends_on:
+      sonarqube:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    volumes:
+      - ./teclado/site:/usr/share/nginx/html:ro
+      - ./teclado/default.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
 volumes:
-  jenkins-data: {}
-  jenkins-home: {}
-  sonarqube_conf: {}
-  sonarqube_data: {}
-  sonarqube_extensions: {}
-  postgresql: {}
-  postgresql_data: {}
+  jenkins_home:
+  sonarqube_conf:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:
+  postgres_data:

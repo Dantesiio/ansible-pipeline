@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  teclado-nginx:
+    image: nginx:1.27-alpine
+    container_name: teclado-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5

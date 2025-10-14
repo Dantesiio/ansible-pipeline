@@ -1,116 +1,198 @@
 ---
-- name: Instalar y configurar Nginx
-  hosts: nginx
-  become: true
-  tasks:
-    - name: Actualizar cache de paquetes
-      apt:
-        update_cache: yes
-
-    - name: Instalar Nginx
-      apt:
-        name: nginx
-        state: present
-
-    - name: Iniciar servicio Nginx
-      systemd:
-        name: nginx
-        state: started
-        enabled: yes
-
-    - name: Cambiar propietario de /var/www/html
-      file:
-        path: /var/www/html
-        owner: "{{ ansible_user }}"
-        group: "{{ ansible_user }}"
-        recurse: yes
-
-- name: Instalación de Docker y Docker Compose en Ubuntu
+- name: Aprovisionar infraestructura Jenkins (Docker + Jenkins + SonarQube)
   hosts: jenkins
   become: true
-  
-  tasks:
-    # Actualizar el cache de paquetes
-    - name: Actualizar el cache de paquetes
+  vars:
+    docker_arch_map:
+      x86_64: amd64
+      aarch64: arm64
+      armv7l: armhf
+    docker_repo_arch: "{{ docker_arch_map[ansible_architecture] | default('amd64') }}"
+    docker_apt_repo: "deb [arch={{ docker_repo_arch }} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+    jenkins_stack_dir: /opt/devops/jenkins
+    jenkins_env_file: "{{ jenkins_stack_dir }}/.env"
+    jenkins_admin_user: "{{ lookup('env', 'JENKINS_ADMIN_ID') | default('admin', true) }}"
+    jenkins_admin_password: "{{ lookup('env', 'JENKINS_ADMIN_PASSWORD') | default('ChangeMe123!', true) }}"
+    sonar_admin_token: "{{ lookup('env', 'SONAR_ADMIN_TOKEN') | default('', true) }}"
+    compose_file_src: docker-compose.yml
+    jenkins_support_dir: files/jenkins
+  pre_tasks:
+    - name: Actualizar cache de paquetes
       apt:
-        update_cache: yes
+        update_cache: true
 
-    # Instalar dependencias para Docker
-    - name: Instalar dependencias para Docker
+    - name: Instalar dependencias base
       apt:
-        name: 
+        name:
           - apt-transport-https
           - ca-certificates
           - curl
-          - gnupg-agent
+          - gnupg
+          - lsb-release
           - software-properties-common
-
-    # Agregar la clave GPG oficial de Docker
-    - name: Agregar la clave GPG oficial de Docker
-      apt_key:
-        url: https://download.docker.com/linux/ubuntu/gpg
+          - rsync
         state: present
 
-    # Agregar el repositorio de Docker al sources.list.d
-    - name: Agregar el repositorio de Docker al sources.list.d
+    - name: Agregar clave GPG de Docker
+      ansible.builtin.shell: |
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Registrar repositorio de Docker
       apt_repository:
-        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable
+        repo: "{{ docker_apt_repo }}"
         state: present
 
-    # Actualizar el cache de paquetes de nuevo (para que encuentre el paquete de Docker)
-    - name: Actualizar el cache de paquetes de nuevo (para que encuentre el paquete de Docker)
+    - name: Actualizar cache tras agregar repositorio Docker
       apt:
-        update_cache: yes
+        update_cache: true
 
-    # Instalar Docker
-    - name: Instalar Docker
+    - name: Instalar Docker Engine y plugins
       apt:
-        name: docker-ce
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
         state: present
 
-    # Añadir el usuario actual al grupo de Docker
-    - name: Añadir el usuario actual al grupo de Docker
+    - name: Asegurar inicio automático de Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Añadir usuario actual al grupo docker
       user:
         name: "{{ ansible_user }}"
         groups: docker
-        append: yes
+        append: true
 
-    # Instalar Docker Compose
-    - name: Instalar Docker Compose
-      shell: |
-        curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-        chmod +x /usr/local/bin/docker-compose
-      args:
-        creates: /usr/local/bin/docker-compose
-    
-    - name: Establecer vm.max_map_count en el kernel
+    - name: Instalar python3-pip
+      apt:
+        name: python3-pip
+        state: present
+
+    - name: Instalar librerías Python docker
+      pip:
+        name:
+          - docker
+          - docker-compose
+        executable: pip3
+
+  tasks:
+    - name: Crear directorio del stack Jenkins
+      file:
+        path: "{{ jenkins_stack_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Crear directorios auxiliares de Jenkins
+      file:
+        path: "{{ jenkins_stack_dir }}/{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - jenkins
+        - jenkins/init.groovy.d
+        - teclado
+        - teclado/site
+
+    - name: Copiar archivo docker-compose del stack Jenkins
+      copy:
+        src: "{{ compose_file_src }}"
+        dest: "{{ jenkins_stack_dir }}/docker-compose.yml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copiar archivos de soporte de Jenkins
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ jenkins_stack_dir }}/{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - { src: files/jenkins/plugins.txt, dest: jenkins/plugins.txt }
+        - { src: files/jenkins/casc.yaml, dest: jenkins/casc.yaml }
+      notify: Reiniciar stack Jenkins
+
+    - name: Copiar scripts init groovy
+      copy:
+        src: files/jenkins/init.groovy.d/
+        dest: "{{ jenkins_stack_dir }}/jenkins/init.groovy.d/"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reiniciar stack Jenkins
+
+    - name: Copiar configuración de Nginx para Teclado
+      copy:
+        src: files/nginx/default.conf
+        dest: "{{ jenkins_stack_dir }}/teclado/default.conf"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Sincronizar aplicación Teclado
+      synchronize:
+        src: "{{ playbook_dir }}/../Teclado/"
+        dest: "{{ jenkins_stack_dir }}/teclado/site/"
+        archive: true
+        delete: true
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=node_modules"
+        private_key: /Users/daviddonneys/.ssh/taller_devops
+        use_ssh_args: true
+        rsync_path: "sudo rsync"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Crear archivo .env del stack Jenkins
+      copy:
+        dest: "{{ jenkins_env_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          JENKINS_ADMIN_ID={{ jenkins_admin_user }}
+          JENKINS_ADMIN_PASSWORD={{ jenkins_admin_password }}
+          SONARQUBE_URL=http://sonarqube:9000
+          SONAR_ADMIN_TOKEN={{ sonar_admin_token }}
+
+    - name: Aplicar sysctl requerido por SonarQube
       sysctl:
         name: vm.max_map_count
-        value: "262144"
+        value: "524288"
         state: present
-        reload: yes
-    
-    - name: Copiar archivo de configuración de Nginx
-      copy:
-        src: docker-compose.yml
-        dest: /home/{{ ansible_user }}/docker-compose.yml
+        reload: true
 
-    # Ejecutar un archivo docker-compose.yml
-    - name: Ejecutar docker-compose.yml
-      command: docker-compose up -d
-      args:
-        chdir: /home/{{ ansible_user }}/
-      become_user: "{{ ansible_user }}"
-      become_method: su
+    - name: Desplegar stack Jenkins con Docker Compose v2
+      community.docker.docker_compose_v2:
+        project_src: "{{ jenkins_stack_dir }}"
+        state: present
+      environment:
+        COMPOSE_PROJECT_NAME: jenkins
+      register: jenkins_compose
 
-    - name: Instalar plugins jenkins
-      command: docker exec -it jenkins jenkins-plugin-cli --plugin-file /plugins.txt
-      become_user: "{{ ansible_user }}"
-      become_method: su
-      notify: restart jenkins
+    - name: Mostrar estado del despliegue Jenkins
+      debug:
+        var: jenkins_compose
 
   handlers:
-    - name: restart jenkins
-      command: sudo docker restart jenkins
-      become_user: "{{ ansible_user }}"
-      become_method: su
+    - name: Reiniciar stack Jenkins
+      community.docker.docker_compose_v2:
+        project_src: "{{ jenkins_stack_dir }}"
+        state: restarted
+      environment:
+        COMPOSE_PROJECT_NAME: jenkins
