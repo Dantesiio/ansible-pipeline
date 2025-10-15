@@ -4,7 +4,7 @@ Playbook para aprovisionar la infraestructura de CI/CD del taller sobre una sola
 
 - **Host `jenkins`**: instala Docker Engine, levanta un stack compuesto por Jenkins LTS (JDK17), SonarQube 9.9 LTS, PostgreSQL 15 y un contenedor Nginx que sirve la aplicación estática `Teclado`. Configura Jenkins con plugins críticos, crea el usuario administrador y registra la instancia Sonar.
 
-## Diagrama / Flujo
+## Estructura de carpetas
 
 ![Estructura del playbook](ansible_images/estructura.png)
 
